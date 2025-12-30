@@ -1,8 +1,52 @@
+<#
+.SYNOPSIS
+    Retrieves manager information for users in the organization.
+
+.DESCRIPTION
+    This script retrieves and displays manager details for specified users or all users in the directory.
+
+.EXAMPLE
+    .\Get-Managers.ps1
+
+.NOTES
+    File Name      : Get-Managers.ps1
+    Author         : 
+    Prerequisite   : PowerShell 5.0 or later
+    Version        : 1.0
+
+.LINK
+    https://docs.microsoft.com/en-us/powershell/module/activedirectory/
+#>
+
+# Check and connect to Exchange Online
 $getSessions = Get-ConnectionInformation | Select-Object Name
-$isConnected = (@($getSessions.Name) -like 'ExchangeOnline*').Count -gt 0
-if (-not $isConnected) {
+if (-not ((@($getSessions.Name) -like 'ExchangeOnline*').Count -gt 0)) {
     Connect-ExchangeOnline
 }
+
+Write-Progress -id 1 -Activity "Getting Manager Information" -Status "Starting" -PercentComplete 0
+
+$managerList = @()
+$users = Get-User
+
+foreach ($user in $users) {
+    $i++
+    Write-Progress -id 1 -Activity "Getting Manager Information" -Status "Completed: $i of $($users.Count)" -PercentComplete (($i / $users.Count) * 100)
+    
+    $manager = if ($user.Manager) {
+        Get-User $user.Manager | Select-Object UserPrincipalName, DisplayName
+    }
+    
+    $managerList += [pscustomobject]@{
+        Name        = $user.DisplayName
+        UPN         = $user.UserPrincipalName
+        Disabled    = $user.AccountDisabled
+        Manager     = $manager.DisplayName
+        ManagerUPN  = $manager.UserPrincipalName
+    }
+}
+
+$managerList | Sort-Object Name | Format-Table *
 
 Write-Progress -id 1 -Activity "Getting Manager Information" -Status "Starting" -PercentComplete 0
 
@@ -29,8 +73,8 @@ foreach($user in $users){
         "Manager" = $manager.DisplayName;
         "ManagerUPN" = $manager.UserPrincipalName;
     }
-	$managerList += $obj | select Name,UPN,Disabled,Manager,ManagerUPN
+	$managerList += $obj | Select-Object Name,UPN,Disabled,Manager,ManagerUPN
 }
 
 $managerList = $managerList | Sort-Object Name
-$managerList | ft *
+$managerList | Format-Table *
