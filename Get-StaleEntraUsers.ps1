@@ -75,7 +75,7 @@ function Get-StaleEntraUsers {
     $createCutoff = (Get-Date).AddDays(-[math]::Abs($GraceDays))
 
     # Properties we need
-    $properties = "id,displayName,userPrincipalName,mail,accountEnabled,userType,createdDateTime,signInActivity"
+    $properties = "id,displayName,userPrincipalName,mail,accountEnabled,userType,createdDateTime,signInActivity,officeLocation,jobTitle"
 
     # Server-side filter when excluding guests
     $filter = $null
@@ -139,7 +139,9 @@ function Get-StaleEntraUsers {
         @{ Name = 'CreatedDateTime'; Expression = { [datetime]$_.CreatedDateTime } },
         @{ Name = 'LastInteractiveSignIn'; Expression = { $_.SignInActivity.LastSignInDateTime } },
         'AccountEnabled',
-        'UserType'
+        'UserType',
+        'OfficeLocation',
+        'JobTitle'
     )
 
     if ($IncludeNonInteractiveColumn) {
