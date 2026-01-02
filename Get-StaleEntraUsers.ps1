@@ -10,6 +10,7 @@ function Get-StaleEntraUsers {
           - Created on or before (Today - GraceDays)
           - Last interactive sign-in older than (Today - StaleDays) OR never signed in
         Optionally excludes guests, disabled accounts, specific UPNs, UPNs containing #EXT#, and/or constrain by domain.
+        Optionally includes assigned licence SKUs in the output.
 
     .PARAMETER StaleDays
         Number of days since last interactive sign-in to consider a user stale. Default: 90.
@@ -35,16 +36,20 @@ function Get-StaleEntraUsers {
     .PARAMETER Domain
         Only include users with UPNs in these domain(s). Accepts multiple.
 
+    .PARAMETER IncludeLicenses
+        When set, includes the AssignedLicenses column (SkuPartNumber values) in the output.
+
     .EXAMPLE
         Get-StaleEntraUsers -ExcludeExtUpns
 
     .EXAMPLE
-        Get-StaleEntraUsers -StaleDays 120 -GraceDays 45 -ExcludeGuests -ExcludeDisabled -ExcludeExtUpns
+        Get-StaleEntraUsers -StaleDays 120 -GraceDays 45 -ExcludeGuests -ExcludeDisabled -ExcludeExtUpns -IncludeLicenses
 
     .NOTES
         Requires Microsoft Graph PowerShell SDK and scopes:
           - User.Read.All
           - AuditLog.Read.All
+          - Organization.Read.All (only needed if -IncludeLicenses is used)
         signInActivity is available in v1.0 when requested via -Property.
     #>
     [CmdletBinding()]
@@ -56,26 +61,39 @@ function Get-StaleEntraUsers {
         [switch]$IncludeNonInteractiveColumn,
         [string[]]$ExcludeUpn,
         [switch]$ExcludeExtUpns,
-        [string[]]$Domain
+        [string[]]$Domain,
+        [switch]$IncludeLicenses
     )
 
-    # Ensure Graph connection with required scopes
+    # Ensure Graph connection with required scopes (add Organization.Read.All if including licences)
+    $requiredScopes = @("User.Read.All","AuditLog.Read.All")
+    if ($IncludeLicenses) { $requiredScopes += "Organization.Read.All" }
+
     try {
         $ctx = Get-MgContext -ErrorAction Stop
     } catch {
         $ctx = $null
     }
 
-    if (-not $ctx -or @("User.Read.All","AuditLog.Read.All") | Where-Object { $ctx.Scopes -notcontains $_ }) {
-        Write-Verbose "Connecting to Microsoft Graph with required scopes..."
-        Connect-MgGraph -Scopes "User.Read.All","AuditLog.Read.All" | Out-Null
+    $needConnect = $false
+    if (-not $ctx) { $needConnect = $true }
+    else {
+        foreach ($s in $requiredScopes) {
+            if ($ctx.Scopes -notcontains $s) { $needConnect = $true; break }
+        }
+    }
+
+    if ($needConnect) {
+        Write-Verbose "Connecting to Microsoft Graph with required scopes: $($requiredScopes -join ', ')"
+        Connect-MgGraph -Scopes $requiredScopes | Out-Null
     }
 
     $staleCutoff  = (Get-Date).AddDays(-[math]::Abs($StaleDays))
     $createCutoff = (Get-Date).AddDays(-[math]::Abs($GraceDays))
 
-    # Properties we need
+    # Properties we need (add assignedLicenses if requested)
     $properties = "id,displayName,userPrincipalName,mail,accountEnabled,userType,createdDateTime,signInActivity,officeLocation,jobTitle"
+    if ($IncludeLicenses) { $properties += ",assignedLicenses" }
 
     # Server-side filter when excluding guests
     $filter = $null
@@ -124,11 +142,25 @@ function Get-StaleEntraUsers {
         }
     }
 
-    # NEW: exclude UPNs containing '#EXT#'
+    # Exclude UPNs containing '#EXT#'
     if ($ExcludeExtUpns) {
         $targets = $targets | Where-Object {
-            # Use case-insensitive check for '#EXT#' anywhere in UPN
             $_.UserPrincipalName -and ($_.UserPrincipalName -notmatch '#EXT#')
+        }
+    }
+
+    # If requested, build a lookup of SkuId -> SkuPartNumber for nice names
+    $skuLookup = $null
+    if ($IncludeLicenses) {
+        $skuLookup = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+        try {
+            $skus = Get-MgSubscribedSku -All
+            foreach ($s in $skus) {
+                # Prefer SkuPartNumber (e.g. M365_E3). You could switch to $s.SkuDisplayName for friendly text.
+                $skuLookup[[string]$s.SkuId] = $s.SkuPartNumber
+            }
+        } catch {
+            Write-Warning "Could not retrieve subscribed SKUs; licence names will show SkuId GUIDs. $_"
         }
     }
 
@@ -148,8 +180,28 @@ function Get-StaleEntraUsers {
         $selectProps += @{ Name = 'LastNonInteractiveSignIn'; Expression = { $_.SignInActivity.LastNonInteractiveSignInDateTime } }
     }
 
+    if ($IncludeLicenses) {
+        $selectProps += @{
+            Name = 'AssignedLicenses'
+            Expression = {
+                $lics = $_.AssignedLicenses
+                if (-not $lics -or $lics.Count -eq 0) { return 'None' }
+                $unique = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                foreach ($lic in $lics) {
+                    $skuId = [string]$lic.SkuId
+                    $name  = if ($skuLookup -and $skuLookup.ContainsKey($skuId)) { $skuLookup[$skuId] } else { $skuId }
+                    [void]$unique.Add($name)
+                }
+                ($unique.ToArray()) -join ', '
+            }
+        }
+    }
+
     $targets |
         Select-Object $selectProps |
         Sort-Object LastInteractiveSignIn, CreatedDateTime, UserPrincipalName |
         Format-Table -AutoSize
 }
+
+# Example
+Get-StaleEntraUsers -StaleDays 90 -GraceDays 30 -ExcludeExtUpns -ExcludeGuests -ExcludeDisabled -IncludeLicenses
